@@ -302,9 +302,6 @@ adler32_avx512bw_chunk(const __m512i *p, const __m512i *const end,
 #  include "../adler32_vec_template.h"
 #endif /* HAVE_AVX512BW_INTRIN */
 
-#if defined(adler32_avx512bw) && HAVE_AVX512BW_NATIVE
-#define DEFAULT_IMPL	adler32_avx512bw
-#else
 static inline adler32_func_t
 arch_select_adler32_func(void)
 {
@@ -325,6 +322,5 @@ arch_select_adler32_func(void)
 	return NULL;
 }
 #define arch_select_adler32_func	arch_select_adler32_func
-#endif
 
 #endif /* LIB_X86_ADLER32_IMPL_H */

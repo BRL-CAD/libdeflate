@@ -51,7 +51,11 @@
 #define HAVE_AVX(features)	(HAVE_AVX_NATIVE      || ((features) & X86_CPU_FEATURE_AVX))
 #define HAVE_AVX2(features)	(HAVE_AVX2_NATIVE     || ((features) & X86_CPU_FEATURE_AVX2))
 #define HAVE_BMI2(features)	(HAVE_BMI2_NATIVE     || ((features) & X86_CPU_FEATURE_BMI2))
-#define HAVE_AVX512BW(features)	(HAVE_AVX512BW_NATIVE || ((features) & X86_CPU_FEATURE_AVX512BW))
+/*
+ * Don't use AVX-512BW instructions without a runtime CPU model check, due to
+ * the downclocking penalty associated with using zmm registers on some CPUs.
+ */
+#define HAVE_AVX512BW(features)	((features) & X86_CPU_FEATURE_AVX512BW)
 
 #if HAVE_DYNAMIC_X86_CPU_FEATURES
 #define X86_CPU_FEATURES_KNOWN		0x80000000

@@ -85,23 +85,62 @@ static const struct cpu_feature x86_cpu_feature_table[] = {
 
 volatile u32 libdeflate_x86_cpu_features = 0;
 
+/*
+ * Don't use the AVX-512 zmm registers without a runtime CPU model check, due to
+ * the downclocking penalty on some CPUs.
+ */
+static bool zmm_allowlisted(char manufacturer[12], u32 family, u32 model)
+{
+#ifdef TEST_SUPPORT__DO_NOT_USE
+	return true;
+#else
+	if (memcmp(manufacturer, "GenuineIntel", 12) == 0 && family == 6) {
+		switch (model) {
+		case 106: /* Ice Lake (Server) */
+		case 125: /* Ice Lake (Client) */
+		case 126: /* Ice Lake (Client) */
+		case 167: /* Rocket Lake */
+			return true;
+		}
+	}
+	return false;
+#endif
+}
+
 /* Initialize libdeflate_x86_cpu_features. */
 void libdeflate_init_x86_cpu_features(void)
 {
 	u32 features = 0;
-	u32 dummy1, dummy2, dummy3, dummy4;
 	u32 max_function;
+	struct {
+		u32 b;
+		u32 d;
+		u32 c;
+	} manufacturer;
+	u32 family_and_model;
+	u32 dummy1, dummy2, dummy4;
 	u32 features_1, features_2, features_3, features_4;
-	bool os_avx_support = false;
-	bool os_avx512_support = false;
+	u32 family;
+	u32 model;
+	bool ymm_allowed = false;
+	bool zmm_allowed = false;
 
 	/* Get maximum supported function  */
-	cpuid(0, 0, &max_function, &dummy2, &dummy3, &dummy4);
+	cpuid(0, 0, &max_function, &manufacturer.b, &manufacturer.c,
+	      &manufacturer.d);
 	if (max_function < 1)
 		goto out;
 
-	/* Standard feature flags  */
-	cpuid(1, 0, &dummy1, &dummy2, &features_2, &features_1);
+	/* Family, model, and standard feature flags */
+	cpuid(1, 0, &family_and_model, &dummy2, &features_2, &features_1);
+
+	family = (family_and_model >> 8) & 0xf;
+	model = (family_and_model >> 4) & 0xf;
+	if (family == 6 || family == 15) {
+		model += (family_and_model >> 12) & 0xf0;
+		if (family == 15)
+			family += (family_and_model >> 20) & 0xff;
+	}
 
 	if (IS_SET(features_1, 26))
 		features |= X86_CPU_FEATURE_SSE2;
@@ -112,19 +151,16 @@ void libdeflate_init_x86_cpu_features(void)
 	if (IS_SET(features_2, 27)) { /* OSXSAVE set? */
 		u64 xcr0 = read_xcr(0);
 
-		os_avx_support = IS_ALL_SET(xcr0,
-					    XCR0_BIT_SSE |
-					    XCR0_BIT_AVX);
+		ymm_allowed = IS_ALL_SET(xcr0, XCR0_BIT_SSE | XCR0_BIT_AVX);
 
-		os_avx512_support = IS_ALL_SET(xcr0,
-					       XCR0_BIT_SSE |
-					       XCR0_BIT_AVX |
-					       XCR0_BIT_OPMASK |
-					       XCR0_BIT_ZMM_HI256 |
-					       XCR0_BIT_HI16_ZMM);
+		zmm_allowed = IS_ALL_SET(xcr0, XCR0_BIT_SSE | XCR0_BIT_AVX |
+					 XCR0_BIT_OPMASK | XCR0_BIT_ZMM_HI256 |
+					 XCR0_BIT_HI16_ZMM) &&
+			      zmm_allowlisted((char *)&manufacturer,
+					      family, model);
 	}
 
-	if (os_avx_support && IS_SET(features_2, 28))
+	if (ymm_allowed && IS_SET(features_2, 28))
 		features |= X86_CPU_FEATURE_AVX;
 
 	if (max_function < 7)
@@ -133,13 +169,13 @@ void libdeflate_init_x86_cpu_features(void)
 	/* Extended feature flags  */
 	cpuid(7, 0, &dummy1, &features_3, &features_4, &dummy4);
 
-	if (os_avx_support && IS_SET(features_3, 5))
+	if (ymm_allowed && IS_SET(features_3, 5))
 		features |= X86_CPU_FEATURE_AVX2;
 
 	if (IS_SET(features_3, 8))
 		features |= X86_CPU_FEATURE_BMI2;
 
-	if (os_avx512_support && IS_SET(features_3, 30))
+	if (zmm_allowed && IS_SET(features_3, 30))
 		features |= X86_CPU_FEATURE_AVX512BW;
 
 out:
