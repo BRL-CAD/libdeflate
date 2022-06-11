@@ -142,6 +142,9 @@ void libdeflate_init_x86_cpu_features(void)
 	if (os_avx512_support && IS_SET(features_3, 30))
 		features |= X86_CPU_FEATURE_AVX512BW;
 
+	if ((features & X86_CPU_FEATURE_AVX) && IS_SET(features_4, 10))
+		features |= X86_CPU_FEATURE_VPCLMULQDQ;
+
 out:
 	disable_cpu_features_for_testing(&features, x86_cpu_feature_table,
 					 ARRAY_LEN(x86_cpu_feature_table));
