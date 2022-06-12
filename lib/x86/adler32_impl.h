@@ -170,67 +170,115 @@ adler32_sse2_chunk(const __m128i *p, const __m128i *const end, u32 *s1, u32 *s2)
 
 /* AVX2 implementation, processes 32 bytes at a time */
 #if HAVE_AVX2_INTRIN
-#  define adler32_avx2		adler32_avx2
-#  define FUNCNAME		adler32_avx2
-#  define FUNCNAME_CHUNK	adler32_avx2_chunk
-#  define IMPL_ALIGNMENT	32
-#  define IMPL_SEGMENT_LEN	32
-#  define IMPL_MAX_CHUNK_LEN	MAX_CHUNK_LEN
 #  if HAVE_AVX2_NATIVE
 #    define ATTRIBUTES
 #  else
 #    define ATTRIBUTES		__attribute__((target("avx2")))
 #  endif
 #  include <immintrin.h>
-static forceinline ATTRIBUTES void
-adler32_avx2_chunk(const __m256i *p, const __m256i *const end, u32 *s1, u32 *s2)
+
+#define adler32_avx2	adler32_avx2
+static u32 ATTRIBUTES MAYBE_UNUSED
+adler32_avx2(u32 adler, const u8 *p, size_t len)
 {
+	const size_t max_chunk_len = (MAX_CHUNK_LEN / 2) & ~31;
 	const __m256i zeroes = _mm256_setzero_si256();
 	const __v32qu multipliers = (__v32qu){
 		32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
-		16, 15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,
+			16, 15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,
 	};
 	const __v16hu ones = (__v16hu)_mm256_set1_epi16(1);
-	__v8su v_s1 = (__v8su)zeroes;
-	__v8su v_s1_sums = (__v8su)zeroes;
-	__v8su v_s2 = (__v8su)zeroes;
+	u32 s1 = adler & 0xFFFF;
+	u32 s2 = adler >> 16;
 
-	do {
-		/* Load the next 32-byte segment. */
-		__m256i bytes = *p++;
-		/*
-		 * Multiply the bytes by 32...1 (the number of times they need
-		 * to be added to s2) and add adjacent products.
-		 */
-		__v16hu sums = (__v16hu)_mm256_maddubs_epi16(
-						bytes, (__m256i)multipliers);
-		/*
-		 * Keep sum of all previous s1 counters, for adding to s2 later.
-		 * This allows delaying the multiplication by 32 to the end.
-		 */
-		v_s1_sums += v_s1;
-		/*
-		 * Add the sum of each group of 8 bytes to the corresponding s1
-		 * counter.
-		 */
-		v_s1 += (__v8su)_mm256_sad_epu8(bytes, zeroes);
-		/*
-		 * Add the sum of each group of 4 products of the bytes by
-		 * 32...1 to the corresponding s2 counter.
-		 */
-		v_s2 += (__v8su)_mm256_madd_epi16((__m256i)sums, (__m256i)ones);
-	} while (p != end);
+	/* Align p to the next 32-byte boundary. */
+	if (len && (uintptr_t)p % 32) {
+		do {
+			s1 += *p++;
+			s2 += s1;
+			len--;
+		} while (len && (uintptr_t)p % 32);
+		s1 %= DIVISOR;
+		s2 %= DIVISOR;
+	}
 
-	/*
-	 * Finish the s2 counters by adding the sum of the s1 values at the
-	 * beginning of each segment, multiplied by the segment length (32).
-	 */
-	v_s2 += (__v8su)_mm256_slli_epi32((__m256i)v_s1_sums, 5);
+	while (len >= 64) {
+		const size_t chunk_len = MIN(len / 2, max_chunk_len) & ~31;
+		const __m256i *vp0 = (const __m256i *)p;
+		const __m256i *vp1 = (const __m256i *)(p + chunk_len);
+		const __m256i * const vp0_end = vp1;
+		__v8su v_s1_a = (__v8su)zeroes;
+		__v8su v_s1_b = (__v8su)zeroes;
+		__v8su v_s1_sums_a = (__v8su)zeroes;
+		__v8su v_s1_sums_b = (__v8su)zeroes;
+		__v8su v_s2_a = (__v8su)zeroes;
+		__v8su v_s2_b = (__v8su)zeroes;
+		__v8su v_s2;
+		__v4su v128_s1_a;
+		__v4su v128_s1_b;
+		__v4su v128_s2;
+		u32 s1_a;
 
-	/* Add the counters to the real s1 and s2. */
-	ADLER32_FINISH_VEC_CHUNK_256(s1, s2, v_s1, v_s2);
+		s2 += s1 * 2 * chunk_len;
+
+		do {
+			__m256i bytes_a = *vp0++;
+			__m256i bytes_b = *vp1++;
+			__v16hu sums_a, sums_b;
+
+			sums_a = (__v16hu)_mm256_maddubs_epi16(bytes_a, (__m256i)multipliers);
+			sums_b = (__v16hu)_mm256_maddubs_epi16(bytes_b, (__m256i)multipliers);
+
+			v_s1_sums_a += v_s1_a;
+			v_s1_sums_b += v_s1_b;
+			v_s1_a += (__v8su)_mm256_sad_epu8(bytes_a, zeroes);
+			v_s1_b += (__v8su)_mm256_sad_epu8(bytes_b, zeroes);
+			v_s2_a += (__v8su)_mm256_madd_epi16((__m256i)sums_a, (__m256i)ones);
+			v_s2_b += (__v8su)_mm256_madd_epi16((__m256i)sums_b, (__m256i)ones);
+		} while (vp0 != vp0_end);
+
+		v_s2_a += (__v8su)_mm256_slli_epi32((__m256i)v_s1_sums_a, 5);
+		v_s2_b += (__v8su)_mm256_slli_epi32((__m256i)v_s1_sums_b, 5);
+		v_s2 = v_s2_a + v_s2_b;
+
+		/* Reduce 256 to 128 bits */
+		v128_s1_a = (__v4su)_mm256_extracti128_si256((__m256i)v_s1_a, 0) +
+			(__v4su)_mm256_extracti128_si256((__m256i)v_s1_a, 1);
+		v128_s1_b = (__v4su)_mm256_extracti128_si256((__m256i)v_s1_b, 0) +
+			(__v4su)_mm256_extracti128_si256((__m256i)v_s1_b, 1);
+		v128_s2 = (__v4su)_mm256_extracti128_si256((__m256i)v_s2, 0) +
+			(__v4su)_mm256_extracti128_si256((__m256i)v_s2, 1);
+
+		/* Reduce 128 to 32 bits */
+		v128_s2 += (__v4su)_mm_shuffle_epi32((__m128i)v128_s2, 0x31);
+		v128_s1_a += (__v4su)_mm_shuffle_epi32((__m128i)v128_s1_a, 0x02);
+		v128_s1_b += (__v4su)_mm_shuffle_epi32((__m128i)v128_s1_b, 0x02);
+		v128_s2 += (__v4su)_mm_shuffle_epi32((__m128i)v128_s2, 0x02);
+		s1_a = _mm_cvtsi128_si32((__m128i)v128_s1_a);
+		s1 += s1_a;
+		s2 += s1_a * chunk_len;
+		s1 += _mm_cvtsi128_si32((__m128i)v128_s1_b);
+		s2 += _mm_cvtsi128_si32((__m128i)v128_s2);
+
+		s1 %= DIVISOR;
+		s2 %= DIVISOR;
+		p += 2 * chunk_len;
+		len -= 2 * chunk_len;
+	}
+
+	/* Process any remaining bytes. */
+	if (len) {
+		do {
+			s1 += *p++;
+			s2 += s1;
+			len--;
+		} while (len);
+		s1 %= DIVISOR;
+		s2 %= DIVISOR;
+	}
+
+	return (s2 << 16) | s1;
 }
-#  include "../adler32_vec_template.h"
 #endif /* HAVE_AVX2_INTRIN */
 
 #if defined(adler32_avx2) && HAVE_AVX2_NATIVE
